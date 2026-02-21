@@ -30,20 +30,29 @@ if not TRANSCRIPT_API_KEY:
         except Exception:
             TRANSCRIPT_API_KEY = None
 
-CHANNELS: List[Dict[str, str]] = [
-    {
-        "name": "大耳朵TV",
-        "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCD_cg9Tak9SvlPHRsWxUIpA",
-    },
-    {
-        "name": "蘋果迷",
-        "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCCC_m0Lw7Z4IT6IjoPb0ZLg",
-    },
-    {
-        "name": "塔科女子",
-        "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCOiu59jL8MFIqq-HkIKCKFg",
-    },
-]
+# 頻道清單改從外部 JSON 讀取，方便擴充 / 調整
+CHANNELS_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "channels.json")
+
+
+def load_channels() -> List[Dict[str, str]]:
+    """Load channel list from channels.json.
+
+    JSON 格式：[{"name": "...", "rss": "..."}, ...]
+    若檔案不存在或解析失敗，會丟出例外，避免悄悄用錯設定。
+    """
+    if not os.path.exists(CHANNELS_CONFIG_PATH):
+        raise SystemExit(f"channels.json not found at {CHANNELS_CONFIG_PATH}")
+    try:
+        with open(CHANNELS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError("channels.json must be a list of objects")
+        for ch in data:
+            if not isinstance(ch, dict) or "name" not in ch or "rss" not in ch:
+                raise ValueError("each channel must be an object with 'name' and 'rss'")
+        return data
+    except Exception as e:
+        raise SystemExit(f"Failed to load channels.json: {e}")
 
 
 def get_latest_video(feed_url: str):
@@ -212,7 +221,8 @@ def main():
 
     notion = Client(auth=NOTION_API_KEY)
 
-    for ch in CHANNELS:
+    channels = load_channels()
+    for ch in channels:
         name = ch["name"]
         rss = ch["rss"]
         print(f"[INFO] 處理頻道：{name}")

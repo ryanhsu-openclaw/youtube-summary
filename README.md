@@ -2,7 +2,7 @@
 
 每天定時抓指定 YouTube 頻道的「最新長影片」字幕（優先中文，否則英文），寫入 Notion 資料庫，並在稍後用 Gemini 幫每支影片產出條列重點＋總結，全部放在同一個 Notion 頁面裡，當作你的「YouTube 摘要牆」。
 
-目前預設頻道：
+目前預設頻道（可在 `channels.json` 裡調整）：
 - 大耳朵TV
 - APPLEFANS 蘋果迷
 - 塔科女子
@@ -142,16 +142,22 @@ python youtube_notion_summarizer.py 5   # 處理最多 5 筆
 
 ### 調整頻道列表
 
-在 `youtube_summary.py` 中修改 `CHANNELS`：
+頻道清單現在獨立放在 `channels.json`，格式如下：
 
-```python
-CHANNELS = [
-    {
-        "name": "Your Channel",
-        "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCxxxxxxxxxxxxxxxxxx",
-    },
+```json
+[
+  {
+    "name": "大耳朵TV",
+    "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCD_cg9Tak9SvlPHRsWxUIpA"
+  },
+  {
+    "name": "蘋果迷",
+    "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCCC_m0Lw7Z4IT6IjoPb0ZLg"
+  }
 ]
 ```
+
+要新增 / 移除頻道，只要編輯 `channels.json`，`youtube_summary.py` 在執行時會自動讀取這個檔案。
 
 ### 調整 Notion 資料庫欄位名稱
 

@@ -35,7 +35,7 @@ NOTION_DATABASE_ID = os.environ.get("YTSUMMARY_NOTION_DATABASE_ID")
 GEMINI_BOT = "/home/azureuser/gemini_bot.py"
 
 # Safety limits
-MAX_TRANSCRIPT_CHARS = 60000  # 上限 60,000 字元，粗略對應 ~20,000 個中文字
+MAX_TRANSCRIPT_CHARS = 15000  # 上限 15,000 字元，粗略對應 ~5,000 個中文字
 CHUNK_SIZE = 1500             # Notion 單個 rich_text block 長度控制
 
 
@@ -157,6 +157,94 @@ def build_gemini_prompt(title: str, transcript: str) -> str:
     ).strip()
 
 
+def strip_non_bmp(text: str) -> str:
+    """移除非 BMP 的 Unicode 字元（例如部分 emoji），避免 ChromeDriver 崩潰。
+
+    ChromeDriver 目前只穩定支援 BMP (U+0000–U+FFFF)，超出範圍的字元會觸發
+    "ChromeDriver only supports characters in the BMP" 錯誤。
+    對摘要內容影響不大，因此在送給 Gemini 之前先清理。
+    """
+    return "".join(ch for ch in text if ord(ch) <= 0xFFFF)
+
+
+def is_mostly_english(text: str, threshold: float = 0.7) -> bool:
+    """粗略判斷逐字稿是否「主要為英文」。
+
+    做法：統計 A-Z/a-z 與 CJK（中日韓）字元數量，如果英文比例高於 threshold，
+    則視為英文逐字稿，之後先做翻譯再摘要。
+    """
+    if not text:
+        return False
+    ascii_letters = 0
+    cjk_chars = 0
+    for ch in text:
+        code = ord(ch)
+        if (65 <= code <= 90) or (97 <= code <= 122):
+            ascii_letters += 1
+        # 常見 CJK 區段粗略判斷
+        if 0x4E00 <= code <= 0x9FFF:
+            cjk_chars += 1
+    total = ascii_letters + cjk_chars
+    if total == 0:
+        return False
+    return ascii_letters / total >= threshold
+
+
+def translate_transcript_to_zh(
+    notion: Client, page_id: str, title: str, transcript: str
+) -> str:
+    """使用 Gemini 將英文逐字稿翻譯成繁體中文，並附加到 Notion 頁面底部。
+
+    - 先用中文指令請 Gemini 把英文逐字稿完整翻成繁體中文，段落以空行分隔。
+    - 回傳翻譯後的全文字串。
+    - 同時在頁面最下方附加一個 heading_2「英文逐字稿中文翻譯」＋多個 paragraph 區塊。
+    """
+    translate_prompt = textwrap.dedent(
+        f"""請將下列 YouTube 影片《{title}》的英文逐字稿，完整翻譯成繁體中文：
+
+        要求：
+        1. 僅輸出翻譯後的逐字稿內容，不要有任何說明、前言或結語。
+        2. 儘量維持原本的段落結構：原文段落之間如果有空行，翻譯後也以空行分隔。
+        3. 用自然的口語繁體中文呈現，保留原意與語氣，但可以略微調整語序讓句子更順。
+        4. 不要加入任何你自己的評論或註解。
+
+        以下是英文逐字稿：
+        {transcript}
+        """
+    ).strip()
+
+    # 為了避免 ChromeDriver BMP 限制，先移除非 BMP 字元
+    translate_prompt = strip_non_bmp(translate_prompt)
+
+    print("[INFO] 偵測逐字稿主要為英文，先呼叫 Gemini 做中文翻譯...")
+    translated = run_gemini(translate_prompt)
+    if not translated:
+        raise RuntimeError("翻譯結果為空")
+
+    # 把翻譯結果附加到頁面底部
+    children: List[Dict] = []
+    children.append(
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {"content": "英文逐字稿中文翻譯"},
+                    }
+                ]
+            },
+        }
+    )
+
+    children.extend(build_paragraph_blocks(translated))
+    notion.blocks.children.append(block_id=page_id, children=children)
+    print("[OK] 已將中文翻譯逐字稿附加到頁面底部。")
+
+    return translated.strip()
+
+
 def run_gemini(prompt: str) -> str:
     """Call gemini_bot.py with the given prompt and return the summarized text.
 
@@ -165,13 +253,19 @@ def run_gemini(prompt: str) -> str:
     """
     # 呼叫外部 gemini_bot.py
     proc = subprocess.run(
-        ["python", GEMINI_BOT, prompt],
+        ["python3", GEMINI_BOT, prompt],
         capture_output=True,
         text=True,
         check=False,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"gemini_bot.py failed: {proc.stderr}")
+        raise RuntimeError(
+            "gemini_bot.py failed (code %s)\nSTDOUT:\n%s\n\nSTDERR:\n%s" % (
+                proc.returncode,
+                proc.stdout,
+                proc.stderr,
+            )
+        )
 
     # stdout 中尋找輸出檔路徑
     out_path = None
@@ -186,6 +280,13 @@ def run_gemini(prompt: str) -> str:
     # 解析輸出檔：gemini_bot.py 現在只寫入模型輸出的純文字結果
     with open(out_path, "r", encoding="utf-8") as f:
         content = f.read()
+
+    # 內容已經讀入記憶體後，就可以刪除暫存檔，避免累積太多 txt
+    try:
+        os.remove(out_path)
+    except OSError:
+        # 若刪除失敗（例如檔案已不存在），忽略即可
+        pass
 
     return content.strip()
 
@@ -456,7 +557,23 @@ def main(limit_pages: int = 1):
             print("[INFO] 找不到任何逐字稿內容，略過。")
             continue
 
-        prompt = build_gemini_prompt(title_text or "(untitled)", transcript)
+        # 如果逐字稿主要是英文，先翻成中文並寫回頁面底部，再用中文版本做摘要
+        transcript_for_summary = transcript
+        if is_mostly_english(transcript):
+            try:
+                transcript_for_summary = translate_transcript_to_zh(
+                    notion,
+                    page_id,
+                    title_text or "(untitled)",
+                    transcript,
+                )
+            except RuntimeError as e:
+                print(f"[WARN] 英文逐字稿翻譯失敗，略過本頁。錯誤：{e}")
+                continue
+
+        prompt = build_gemini_prompt(title_text or "(untitled)", transcript_for_summary)
+        # 移除非 BMP 字元（主要是 emoji 等特殊符號），避免 ChromeDriver 崩潰
+        prompt = strip_non_bmp(prompt)
         print("[INFO] 呼叫 Gemini 產生摘要...")
         try:
             summary = run_gemini(prompt)
