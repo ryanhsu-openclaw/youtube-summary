@@ -1,6 +1,6 @@
 # YouTube Summary to Notion
 
-每天定時抓指定 YouTube 頻道的「最新長影片」字幕（優先中文，否則英文），寫入 Notion 資料庫，並在稍後用 Gemini 幫每支影片產出條列重點＋總結，全部放在同一個 Notion 頁面裡，當作你的「YouTube 摘要牆」。
+每天抓指定 YouTube 頻道的「最新長影片」字幕（優先中文，否則英文），寫入 Notion 資料庫，並在稍後自動為每支影片產出內容摘要（中文逐字稿）或中文翻譯（英文逐字稿），全部放在同一個 Notion 頁面裡，當作你的「YouTube 摘要牆」。
 
 目前預設頻道（可在 `channels.json` 裡調整）：
 - 大耳朵TV
@@ -8,8 +8,8 @@
 - 塔科女子
 
 > 這個專案主要有兩支腳本：
-> - `youtube_summary.py`：每天抓最新影片 + 抓字幕 + 寫入 Notion
-> - `youtube_notion_summarizer.py`：用 Gemini 幫 Notion 裡的逐字稿產生摘要，寫回同一頁最上方
+> - `youtube_summary.py`：抓最新影片 + 抓字幕 + 寫入 Notion
+> - `youtube_notion_summarizer.py`：為 Notion 裡的逐字稿產生內容摘要（中文）或中文翻譯（英文），寫回同一頁
 
 ---
 
@@ -32,27 +32,27 @@
   - 逐字稿全文會寫在 page 的內文區塊（多個 paragraph），方便之後摘要與搜尋。
 
 - `youtube_notion_summarizer.py`
-  - 從同一個 Notion 資料庫中挑出尚未有「內容摘要」的頁面（實作上是：
-    - parent.database_id = `YTSUMMARY_NOTION_DATABASE_ID`
-    - 沒有 heading block 含有「內容摘要」文字）
-  - 對每一頁：
-    1. 讀取頁面正文的 paragraph blocks，合併為一段 transcript（超過 60,000 字元會截斷）
-    2. 組一個中文 prompt，請 Gemini：
-       - 以繁中整理出「大約 10 點」條列重點
-       - 產生一段約 300 字的「總結」
-       - 內文中對關鍵詞加上粗體效果（透過簡化版 Markdown `**...**` 解析）
-       - 禁止自我介紹、禁止「如果覺得有幫助」這類尾巴
-    3. 呼叫 `/home/azureuser/gemini_bot.py` 把 prompt 丟給 Gemini，讀回純文字結果
-    4. 做一層簡單清理：移除包含「Gemini」「如果覺得有幫助」「您可以直接提供」等字眼的行
-    5. 將原頁面的所有 blocks 標記為 `archived`，再重建內容：
+  - 從同一個 Notion 資料庫中挑出尚未產生「內容摘要」的中文頁面，以及尚未有「英文逐字稿中文翻譯」的英文頁面
+  - 中文逐字稿頁面：
+    1. 讀取頁面正文的 paragraph blocks，合併為一段 transcript（長度過長會截斷）
+    2. 組一個中文 prompt，請後端模型（透過本機 `gemini_bot.py`）產生：
+       - 約 10 點的「重點整理」（條列）
+       - 一段約 300 字的「總結」
+       - 內文本身允許使用簡化版 Markdown `**...**` 做粗體標記
+    3. 清理掉常見的客套或行動呼籲句
+    4. 將原頁面的 blocks archive，改用新布局重建：
        - `heading_2`：`內容摘要`
-       - **重點整理**：使用 `numbered_list_item`，格式類似：
-         - `1.` 粗體標題 + `：` 說明文字
-       - **總結段落**：
-         - `總結：` 粗體
-         - 後面是一段普通文字
+       - 編號清單：依照整理出來的重點建立 `numbered_list_item`
+       - 一段以「總結：」開頭的 summary 段落
        - `divider`
        - 原始 transcript：切成多個 paragraph blocks
+  - 英文逐字稿頁面：
+    1. 先判斷逐字稿內容是否「主要為英文」（以英文字母 vs CJK 字元比例粗略判斷）
+    2. 若為英文，則使用 `deep-translator` 的 `GoogleTranslator(source="en", target="zh-TW")` 分段翻譯全文（避免超過單次 5000 字元限制）
+    3. 在頁面底部附加：
+       - `heading_2`：`英文逐字稿中文翻譯`
+       - 若干 paragraph blocks，內容為翻譯後的中文逐字稿
+    4. 英文頁面**不產生「內容摘要」**，僅保留原文＋中文翻譯
 
 ---
 
