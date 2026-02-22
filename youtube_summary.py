@@ -123,6 +123,47 @@ def build_summary_prompt(channel_name: str, title: str, transcript: str) -> str:
     return f"頻道：{channel_name}\n標題：{title}\n\n內文：{transcript[:4000]}"
 
 
+def video_already_exists(notion: Client, video_url: str) -> bool:
+    """檢查目標 Notion 資料庫中，是否已存在 `Video URL == video_url` 的頁面。
+
+    為了避開目前 notion-client 版本缺少 databases.query 的問題，這裡改用
+    直接呼叫 Notion 官方 REST API `/v1/databases/{id}/query`，以 URL 欄位過濾。
+    """
+    if not NOTION_API_KEY:
+        # 沒有 API key 的情況下無法查詢，只好視為尚未存在，讓上游決定怎麼做
+        print("[WARN] NOTION_API_KEY 未設定，無法檢查是否已有相同影片，先視為不存在。")
+        return False
+
+    try:
+        resp = requests.post(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+            headers={
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json",
+            },
+            json={
+                "page_size": 1,
+                "filter": {
+                    "property": "Video URL",
+                    "url": {"equals": video_url},
+                },
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            print(f"[WARN] 查詢 Notion 去重失敗（status={resp.status_code}），先視為不存在。")
+            return False
+        data = resp.json()
+        exists = bool(data.get("results"))
+        if exists:
+            print(f"[INFO] Notion 已存在最新影片頁面（Video URL 去重命中）。")
+        return exists
+    except Exception as e:
+        print(f"[WARN] 查詢 Notion 是否已存在影片頁面時發生錯誤，先視為不存在：{e}")
+        return False
+
+
 def create_page(notion: Client, channel_name: str, entry, transcript: str, summary: str):
     # 發布時間
     published = None
@@ -231,25 +272,13 @@ def main():
             print(f"[WARN] {name} 沒有抓到任何影片")
             continue
 
-        # 只處理「發布日期是今天」的影片（依台北時間粗略判定）
-        today_tpe = (dt.datetime.utcnow() + dt.timedelta(hours=8)).date()
-        published_date = None
-        if getattr(entry, "published_parsed", None):
-            try:
-                published_date = dt.date(
-                    entry.published_parsed.tm_year,
-                    entry.published_parsed.tm_mon,
-                    entry.published_parsed.tm_mday,
-                )
-            except Exception:
-                published_date = None
-        if published_date != today_tpe:
-            print(
-                f"[INFO] 最新影片不是今天發的（published={published_date}，today={today_tpe}），略過：{entry.title}"
-            )
+        video_url = entry.link
+        # 若該影片已存在於「YouTube 摘要牆」，就略過，不重複建立頁面
+        if video_already_exists(notion, video_url):
+            print(f"[INFO] Notion 已存在最新影片頁面，略過：{entry.title}")
             continue
 
-        transcript = get_transcript_via_tapi(entry.link)
+        transcript = get_transcript_via_tapi(video_url)
         if not transcript:
             print(f"[INFO] 找不到可用字幕（中文 / 英文），略過寫入 Notion：{entry.title}")
             continue

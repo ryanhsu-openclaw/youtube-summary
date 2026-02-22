@@ -28,6 +28,7 @@ from typing import List, Dict
 
 from notion_client import Client
 import subprocess
+from deep_translator import GoogleTranslator
 
 
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
@@ -193,31 +194,41 @@ def is_mostly_english(text: str, threshold: float = 0.7) -> bool:
 def translate_transcript_to_zh(
     notion: Client, page_id: str, title: str, transcript: str
 ) -> str:
-    """使用 Gemini 將英文逐字稿翻譯成繁體中文，並附加到 Notion 頁面底部。
+    """使用 deep-translator 將英文逐字稿翻譯成繁體中文，並附加到 Notion 頁面底部。
 
-    - 先用中文指令請 Gemini 把英文逐字稿完整翻成繁體中文，段落以空行分隔。
+    - 透過 GoogleTranslator(source="en", target="zh-TW") 進行翻譯。
     - 回傳翻譯後的全文字串。
     - 同時在頁面最下方附加一個 heading_2「英文逐字稿中文翻譯」＋多個 paragraph 區塊。
     """
-    translate_prompt = textwrap.dedent(
-        f"""請將下列 YouTube 影片《{title}》的英文逐字稿，完整翻譯成繁體中文：
+    print("[INFO] 偵測逐字稿主要為英文，使用 deep-translator 做中文翻譯...")
 
-        要求：
-        1. 僅輸出翻譯後的逐字稿內容，不要有任何說明、前言或結語。
-        2. 儘量維持原本的段落結構：原文段落之間如果有空行，翻譯後也以空行分隔。
-        3. 用自然的口語繁體中文呈現，保留原意與語氣，但可以略微調整語序讓句子更順。
-        4. 不要加入任何你自己的評論或註解。
+    # deep-translator / Google Translate 單次上限約 5000 字元，需分段翻譯後再串接
+    def _chunk(text: str, max_len: int = 4000):
+        lines = text.split("\n")
+        buf = []
+        cur = 0
+        for ln in lines:
+            ln2 = ln + "\n"
+            if cur + len(ln2) > max_len and buf:
+                yield "".join(buf).rstrip()
+                buf = [ln2]
+                cur = len(ln2)
+            else:
+                buf.append(ln2)
+                cur += len(ln2)
+        if buf:
+            yield "".join(buf).rstrip()
 
-        以下是英文逐字稿：
-        {transcript}
-        """
-    ).strip()
+    try:
+        translated_chunks = []
+        for idx, chunk in enumerate(_chunk(transcript, 4000), start=1):
+            print(f"[INFO] 翻譯分段 {idx}...")
+            translated_chunk = GoogleTranslator(source="en", target="zh-TW").translate(chunk)
+            translated_chunks.append(translated_chunk)
+        translated = "\n\n".join(translated_chunks).strip()
+    except Exception as e:
+        raise RuntimeError(f"本地翻譯失敗：{e}")
 
-    # 為了避免 ChromeDriver BMP 限制，先移除非 BMP 字元
-    translate_prompt = strip_non_bmp(translate_prompt)
-
-    print("[INFO] 偵測逐字稿主要為英文，先呼叫 Gemini 做中文翻譯...")
-    translated = run_gemini(translate_prompt)
     if not translated:
         raise RuntimeError("翻譯結果為空")
 
@@ -557,21 +568,22 @@ def main(limit_pages: int = 1):
             print("[INFO] 找不到任何逐字稿內容，略過。")
             continue
 
-        # 如果逐字稿主要是英文，先翻成中文並寫回頁面底部，再用中文版本做摘要
-        transcript_for_summary = transcript
+        # 如果逐字稿主要是英文，僅翻譯成中文附加在頁面底部，不產生「內容摘要」。
+        # 之後中文頁面才進入摘要流程。
         if is_mostly_english(transcript):
             try:
-                transcript_for_summary = translate_transcript_to_zh(
+                _ = translate_transcript_to_zh(
                     notion,
                     page_id,
                     title_text or "(untitled)",
                     transcript,
                 )
+                print("[INFO] 英文逐字稿已翻譯為中文並寫入頁面底部，本頁不再產生內容摘要。")
             except RuntimeError as e:
                 print(f"[WARN] 英文逐字稿翻譯失敗，略過本頁。錯誤：{e}")
-                continue
+            continue
 
-        prompt = build_gemini_prompt(title_text or "(untitled)", transcript_for_summary)
+        prompt = build_gemini_prompt(title_text or "(untitled)", transcript)
         # 移除非 BMP 字元（主要是 emoji 等特殊符號），避免 ChromeDriver 崩潰
         prompt = strip_non_bmp(prompt)
         print("[INFO] 呼叫 Gemini 產生摘要...")
